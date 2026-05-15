@@ -40,22 +40,34 @@ def node_fetch_pr(state: ReviewState) -> dict:
 
 def node_analyze(state: ReviewState) -> dict:
     console.print("[cyan]→ analyze[/cyan]")
-    # TODO: call the LLM with structured output PRAnalysis.
-    # Hint:  llm = get_llm().with_structured_output(PRAnalysis)
-    #        analysis = llm.invoke([...])
-    #        return {"analysis": analysis}
-    # When implemented, wrap the call in:
-    #        with console.status("[dim]LLM thinking...[/dim]"):
-    #            analysis = llm.invoke([...])
-    raise NotImplementedError("Implement node_analyze")
+    llm = get_llm().with_structured_output(PRAnalysis)
+    with console.status("[dim]LLM thinking...[/dim]"):
+        analysis = llm.invoke([
+            {"role": "system", "content": (
+                "You are a senior code reviewer. Provide structured output. "
+                "Rate confidence using these STRICT bands:\n"
+                "- 0.74–0.95: trivial mechanical change (typo, dep bump, rename) with ZERO open questions.\n"
+                "- 0.60–0.72: small feature, schema field addition, or refactor that is mostly safe. "
+                "May have 1–2 minor open questions (migration ordering, naming, missing test). "
+                "DEFAULT to this band when the change is small and you see NO security issues.\n"
+                "- 0.30–0.57: clear security red flags present — weak hashing (MD5/SHA1), SQL injection, "
+                "plaintext secrets, missing auth, hard-coded credentials, no tests for new auth/storage code.\n"
+                "Pick a value within the band; do not hover on band edges."
+            )},
+            {"role": "user", "content": f"Title: {state['pr_title']}\nDiff:\n{state['pr_diff']}"},
+        ])
+    console.print(f"  [green]✓[/green] confidence={analysis.confidence:.0%}, {len(analysis.comments)} comment(s)")
+    return {"analysis": analysis}
 
 
 def node_route(state: ReviewState) -> dict:
     console.print("[cyan]→ route[/cyan]")
-    # TODO: read state["analysis"].confidence and return
-    #       {"decision": "auto_approve" | "human_approval" | "escalate"}
-    # Thresholds provided: AUTO_APPROVE_THRESHOLD (0.85) and ESCALATE_THRESHOLD (0.60).
-    raise NotImplementedError("Implement node_route")
+    c = state["analysis"].confidence
+    if c >= AUTO_APPROVE_THRESHOLD:   decision = "auto_approve"
+    elif c < ESCALATE_THRESHOLD:      decision = "escalate"
+    else:                             decision = "human_approval"
+    console.print(f"  [green]✓[/green] decision=[bold]{decision}[/bold] (confidence={c:.0%})")
+    return {"decision": decision}
 
 
 def node_auto_approve(state: ReviewState) -> dict:
@@ -75,11 +87,22 @@ def node_escalate(state: ReviewState) -> dict:
 
 def build_graph():
     g = StateGraph(ReviewState)
-    # TODO: add_node for the 6 nodes above (fetch_pr, analyze, route, auto_approve, human_approval, escalate)
-    # TODO: add_edge from START → fetch_pr → analyze → route
-    # TODO: add_conditional_edges on "route" with mapping
-    #       {"auto_approve": "auto_approve", "human_approval": "human_approval", "escalate": "escalate"}
-    # TODO: add_edge from each terminal node → END
+    for name, fn in [
+        ("fetch_pr", node_fetch_pr), ("analyze", node_analyze), ("route", node_route),
+        ("auto_approve", node_auto_approve), ("human_approval", node_human_approval),
+        ("escalate", node_escalate),
+    ]:
+        g.add_node(name, fn)
+    g.add_edge(START, "fetch_pr")
+    g.add_edge("fetch_pr", "analyze")
+    g.add_edge("analyze", "route")
+    g.add_conditional_edges(
+        "route", lambda s: s["decision"],
+        {"auto_approve": "auto_approve", "human_approval": "human_approval", "escalate": "escalate"},
+    )
+    g.add_edge("auto_approve", END)
+    g.add_edge("human_approval", END)
+    g.add_edge("escalate", END)
     return g.compile()
 
 
